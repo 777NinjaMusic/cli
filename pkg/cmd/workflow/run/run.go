@@ -127,7 +127,6 @@ func runRun(opts *RunOptions) error {
 
 	fmt.Printf("DBG %#v\n", inputs)
 
-	// TODO ensure it is a workflow_dispatch
 	// TODO generate survey prompts for the inputs
 	// TODO validate whatever input we got
 	// TODO create the dispatch event
@@ -136,70 +135,66 @@ func runRun(opts *RunOptions) error {
 }
 
 type WorkflowInput struct {
-	Name        string
+	// TODO i'd put Name in here but that's not how the yaml is structured. decide if things should be inconsistent or not.
 	Required    bool
 	Default     string
 	Description string
 }
 
 func findInputs(rootNode yaml.Node) (map[string]WorkflowInput, error) {
-	// find an On node
-	// find a WorkflowDispatch node
-	// find an inputs node
-
 	out := map[string]WorkflowInput{}
 
-	var onNode *yaml.Node
-	var dispatchNode *yaml.Node
-	var inputsNode *yaml.Node
+	var onKeyNode *yaml.Node
+	var dispatchKeyNode *yaml.Node
+	var inputsKeyNode *yaml.Node
+	var inputsMapNode *yaml.Node
 
 	if len(rootNode.Content) != 1 {
 		return nil, errors.New("invalid yaml file")
 	}
 
+	// TODO this is pretty hideous
 	for _, node := range rootNode.Content[0].Content {
-		if strings.EqualFold(node.Value, "on") {
-			onNode = node
+		if onKeyNode != nil {
+			for _, node := range node.Content {
+				if dispatchKeyNode != nil {
+					for _, node := range node.Content {
+						if inputsKeyNode != nil {
+							inputsMapNode = node
+							break
+						}
+						if node.Value == "inputs" {
+							inputsKeyNode = node
+						}
+					}
+					break
+				}
+				if node.Value == "workflow_dispatch" {
+					dispatchKeyNode = node
+				}
+			}
 			break
+		}
+		if strings.EqualFold(node.Value, "on") {
+			onKeyNode = node
 		}
 	}
 
-	if onNode == nil {
+	if onKeyNode == nil {
 		return nil, errors.New("invalid workflow: no 'on' key")
 	}
 
-	// TODO the below is broken; need to grab sibling nodes and iterate over them. Decide if we should try and streamline and reuse config parsing stuff or just mimic it.
-
-	// i'm leaning towards just mimicking: i'd prefer two parallel
-	// implementations of yaml parsing that we then later merge as a
-	// standalone project instead of trying to generalize and reuse on
-	// the fly, especially since the config stuff is a distinct specific
-	// yaml structure from a workflow file.
-	fmt.Printf("DBG %#v\n", onNode)
-	for _, node := range onNode.Content {
-		if strings.EqualFold(node.Value, "workflow_dispatch") {
-			dispatchNode = node
-			break
-		}
-	}
-
-	if dispatchNode == nil {
+	if dispatchKeyNode == nil {
 		return nil, errors.New("unable to manually run a workflow without a workflow_dispatch event")
 	}
 
-	for _, node := range dispatchNode.Content {
-		if strings.EqualFold(node.Value, "inputs") {
-			inputsNode = node
-			break
-		}
-	}
-
-	if inputsNode == nil {
+	if inputsKeyNode == nil || inputsMapNode == nil {
 		return out, nil
 	}
 
-	for _, inputNode := range inputsNode.Content {
-		fmt.Printf("DBG %#v\n", inputNode)
+	err := inputsMapNode.Decode(&out)
+	if err != nil {
+		return nil, fmt.Errorf("could not decode workflow inputs: %w", err)
 	}
 
 	return out, nil
