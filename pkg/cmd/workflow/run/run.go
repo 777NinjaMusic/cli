@@ -136,12 +136,7 @@ func runRun(opts *RunOptions) error {
 		return err
 	}
 
-	type providedValue struct {
-		// TODO this is dumb
-		Value string
-	}
-
-	providedInputs := map[string]*providedValue{}
+	providedInputs := map[string]string{}
 
 	// TODO is opts.Prompt doing too much here?
 	if opts.Prompt {
@@ -157,24 +152,28 @@ func runRun(opts *RunOptions) error {
 
 		if len(opts.InputArgs) > 0 {
 			fs := pflag.FlagSet{}
+			//var test string
 			for inputName, input := range inputs {
-				// TODO unfuck this
-				providedValue := providedInputs[inputName]
-				fs.StringVar(&providedValue.Value, inputName, input.Default, input.Description)
+				fs.String(inputName, input.Default, input.Description)
 			}
 			err = fs.Parse(opts.InputArgs)
 			if err != nil {
 				return fmt.Errorf("could not parse input args: %w", err)
 			}
-			fmt.Printf("DBG %#v\n", "WHAT IS UP")
-			fmt.Printf("DBG %#v\n", providedInputs)
+			for inputName, input := range inputs {
+				// TODO error handling
+				providedValue, _ := fs.GetString(inputName)
+
+				if input.Required && providedValue == "" {
+					return fmt.Errorf("missing required input '%s'", inputName)
+				}
+
+				providedInputs[inputName] = providedValue
+			}
 		}
 	}
 
-	// name, bar
-	// gh workflow run foo.yml -- --name=hi
-
-	fmt.Printf("DBG %#v\n", inputs)
+	fmt.Printf("DBG %#v\n", providedInputs)
 
 	// TODO generate survey prompts for the inputs
 	// TODO validate whatever input we got
