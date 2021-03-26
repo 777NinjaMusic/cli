@@ -2,8 +2,10 @@ package run
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/cli/cli/pkg/cmdutil"
 	"github.com/cli/cli/pkg/iostreams"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +28,9 @@ type RunOptions struct {
 	Selector string
 	Ref      string
 
+	InputArgs []string
+	JSON      string
+
 	Prompt bool
 }
 
@@ -35,9 +41,14 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 	}
 
 	cmd := &cobra.Command{
-		Use:    "run [<workflow ID> | <workflow name>]",
-		Short:  "Create a dispatch event for a workflow, starting a run",
-		Args:   cobra.MaximumNArgs(1),
+		Use:   "run [<workflow ID> | <workflow name>]",
+		Short: "Create a dispatch event for a workflow, starting a run",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.ArgsLenAtDash() == 0 && len(args[1:]) > 0 {
+				return cmdutil.FlagError{Err: fmt.Errorf("workflow argument required when passing input flags")}
+			}
+			return nil
+		},
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// support `-R, --repo` override
@@ -45,10 +56,29 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 
 			if len(args) > 0 {
 				opts.Selector = args[0]
+				opts.InputArgs = args[1:]
 			} else if !opts.IO.CanPrompt() {
 				return &cmdutil.FlagError{Err: errors.New("workflow ID or name required when not running interactively")}
 			} else {
 				opts.Prompt = true
+			}
+
+			if !opts.IO.IsStdinTTY() {
+				jsonIn, err := ioutil.ReadAll(opts.IO.In)
+				if err != nil {
+					return errors.New("failed to read from STDIN")
+				}
+				opts.JSON = string(jsonIn)
+			}
+
+			if opts.Selector == "" {
+				if opts.JSON != "" {
+					return &cmdutil.FlagError{Err: errors.New("workflow argument required when passing JSON")}
+				}
+			} else {
+				if opts.JSON != "" && len(opts.InputArgs) > 0 {
+					return &cmdutil.FlagError{Err: errors.New("only one of JSON or input arguments can be passed at a time")}
+				}
 			}
 
 			if runF != nil {
@@ -58,6 +88,7 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 		},
 	}
 	cmd.Flags().StringVarP(&opts.Ref, "ref", "r", "", "The branch or tag name which contains the version of the workflow file you'd like to run")
+	cmd.Flags().StringVar(&opts.JSON, "json", "", "TODO")
 
 	return cmd
 }
@@ -100,30 +131,48 @@ func runRun(opts *RunOptions) error {
 		return fmt.Errorf("unable to fetch workflow file content: %w", err)
 	}
 
-	/*
-			type WorkflowYAML struct {
-				On struct {
-					WorkflowDispatch struct {
-						Inputs map[string]map[string]string
-					} `yaml:"workflow_dispatch"`
-				}
-			}
-
-			var parsed WorkflowYAML
-			parsed := map[string]interface{}{}
-		err = yaml.Unmarshal(yamlContent, &parsed)
-	*/
-
-	var root yaml.Node
-	err = yaml.Unmarshal(yamlContent, &root)
-	if err != nil {
-		return fmt.Errorf("unable to parse workflow YAML: %w", err)
-	}
-
-	inputs, err := findInputs(root)
+	inputs, err := findInputs(yamlContent)
 	if err != nil {
 		return err
 	}
+
+	type providedValue struct {
+		// TODO this is dumb
+		Value string
+	}
+
+	providedInputs := map[string]*providedValue{}
+
+	// TODO is opts.Prompt doing too much here?
+	if opts.Prompt {
+		// TODO survey version
+		return nil
+	} else {
+		if opts.JSON != "" {
+			err := json.Unmarshal([]byte(opts.JSON), providedInputs)
+			if err != nil {
+				return fmt.Errorf("could not parse provided JSON: %w", err)
+			}
+		}
+
+		if len(opts.InputArgs) > 0 {
+			fs := pflag.FlagSet{}
+			for inputName, input := range inputs {
+				// TODO unfuck this
+				providedValue := providedInputs[inputName]
+				fs.StringVar(&providedValue.Value, inputName, input.Default, input.Description)
+			}
+			err = fs.Parse(opts.InputArgs)
+			if err != nil {
+				return fmt.Errorf("could not parse input args: %w", err)
+			}
+			fmt.Printf("DBG %#v\n", "WHAT IS UP")
+			fmt.Printf("DBG %#v\n", providedInputs)
+		}
+	}
+
+	// name, bar
+	// gh workflow run foo.yml -- --name=hi
 
 	fmt.Printf("DBG %#v\n", inputs)
 
@@ -141,17 +190,21 @@ type WorkflowInput struct {
 	Description string
 }
 
-func findInputs(rootNode yaml.Node) (map[string]WorkflowInput, error) {
-	out := map[string]WorkflowInput{}
+func findInputs(yamlContent []byte) (map[string]WorkflowInput, error) {
+	var rootNode yaml.Node
+	err := yaml.Unmarshal(yamlContent, &rootNode)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse workflow YAML: %w", err)
+	}
+
+	if len(rootNode.Content) != 1 {
+		return nil, errors.New("invalid yaml file")
+	}
 
 	var onKeyNode *yaml.Node
 	var dispatchKeyNode *yaml.Node
 	var inputsKeyNode *yaml.Node
 	var inputsMapNode *yaml.Node
-
-	if len(rootNode.Content) != 1 {
-		return nil, errors.New("invalid yaml file")
-	}
 
 	// TODO this is pretty hideous
 	for _, node := range rootNode.Content[0].Content {
@@ -188,11 +241,13 @@ func findInputs(rootNode yaml.Node) (map[string]WorkflowInput, error) {
 		return nil, errors.New("unable to manually run a workflow without a workflow_dispatch event")
 	}
 
+	out := map[string]WorkflowInput{}
+
 	if inputsKeyNode == nil || inputsMapNode == nil {
 		return out, nil
 	}
 
-	err := inputsMapNode.Decode(&out)
+	err = inputsMapNode.Decode(&out)
 	if err != nil {
 		return nil, fmt.Errorf("could not decode workflow inputs: %w", err)
 	}
